@@ -1,5 +1,11 @@
+
+import { GoogleGenAI, GenerateContentResponse } from '@google/genai';
 import { DiscussionTurn, PhysicistPersonaId, AgentState, MemoryEntry } from '../types';
 import { PHYSICIST_PERSONAS, WRITING_PRINCIPLES } from '../constants';
+
+// Initialize the Gemini client, assuming API_KEY is in the environment
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
+const model = 'gemini-2.5-flash';
 
 const MEM0_API_KEY = 'm0-DEwYCwPbuKZl2GEHNK4L34y4U31P77rfhWL62r6W';
 
@@ -51,7 +57,7 @@ class MockMemoryClient {
     const filtered = sessionEntries.filter(e => 
       Object.entries(filter).every(([key, value]) => e.metadata[key] === value)
     );
-    const results = filtered.slice(-5);
+    const results = filtered.sort((a,b) => a.metadata.timestamp - b.metadata.timestamp);
     console.log(`[Mem0] Found ${results.length} relevant memories.`);
     await new Promise(resolve => setTimeout(resolve, 50)); // Simulate latency
     return results;
@@ -78,59 +84,75 @@ class MockMemoryClient {
 
 export const memoryClient = new MockMemoryClient(MEM0_API_KEY);
 
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
 
 // --- AGENTIC SYSTEM SIMULATION (LANGGRAPH) ---
 
 /**
- * Orchestrator Node (Simulates DeepSeek Planner)
- * Creates a plan for the other agents to follow.
+ * Orchestrator Node (Uses Gemini to generate a plan)
  */
 async function orchestratorNode(state: AgentState): Promise<Partial<AgentState>> {
   console.log(`[Orchestrator] Iteration ${state.iteration}. Creating plan...`);
   const knowledge = await memoryClient.search("Retrieve writing principles.", { type: 'knowledge_base' });
-  
-  const plan = `Plan: 
-1. Each physicist will analyze the user's text from their unique perspective.
-2. The analysis must adhere to the core writing principles found in memory.
-3. Each agent will provide a concise, critical paragraph.
-4. The Reflector will synthesize these views and check for contradictions or shallow analysis.
-The goal is to provide deep, multi-faceted feedback.`;
+  const personaNames = state.personas.map(pId => PHYSICIST_PERSONAS.find(p => p.id === pId)!.name).join(', ');
 
-  await memoryClient.add({ text: plan, metadata: { type: 'plan' } });
+  const prompt = `
+    You are an orchestrator for a multi-agent AI system. Your role is to create a clear, concise plan for a panel of simulated physicists who will analyze a piece of text.
+
+    **Panelists:** ${personaNames}
+    **Core Principles:** ${knowledge.map(k => k.text).join('\n')}
+    **User's Text (first 100 chars):** "${state.originalText.substring(0, 100)}..."
+
+    **Task:** Generate a short, numbered plan for the discussion. The plan should guide the agents to provide a multi-faceted critique, leveraging their unique perspectives. Keep the plan to 3-4 steps.
+  `;
+
+  const response = await ai.models.generateContent({ model, contents: prompt });
+  const plan = response.text;
+
+  await memoryClient.add({ text: `Discussion Plan: ${plan}`, metadata: { type: 'plan' } });
   return { plan };
 }
 
 /**
- * Specialist Agent Node (Simulates Physicist Personas)
- * Executes one turn of the discussion for each persona.
+ * Specialist Agent Node (Generates persona responses using Gemini)
  */
 async function specialistAgentNode(state: AgentState): Promise<Partial<AgentState>> {
     console.log('[Specialists] Starting round table discussion...');
     const newDiscussionTurns: DiscussionTurn[] = [];
 
+    const contextMemories = await memoryClient.search("Get all context for discussion");
+    const context = contextMemories.map(m => m.text).join('\n---\n');
+
     for (const personaId of state.personas) {
         const persona = PHYSICIST_PERSONAS.find(p => p.id === personaId)!;
         
-        // Simulate thinking: retrieve context from memory
-        const contextMemories = await memoryClient.search(`Get context for ${persona.name}`);
-        const context = contextMemories.map(m => m.text).join('\n');
-        
-        const scratchpad = `Thinking Log for ${persona.name}:
-- Task: Analyze text: "${state.originalText.substring(0, 50)}..."
-- My Core Principle: "${persona.prompt.substring(0, 70)}..."
-- Recent Context: ${context ? `"${context.substring(0, 100)}..."` : "None"}
-- **Conclusion**: The primary issue is [mock conclusion]. It fails to [mock failure]. My recommendation is to [mock recommendation].`;
+        const prompt = `
+          **Your Persona:**
+          ${persona.prompt}
 
-        await memoryClient.add({ text: scratchpad, metadata: { type: 'agent_scratchpad', agentId: persona.id } });
+          **Your Task:**
+          You are part of a round-table discussion with other physicists. Analyze the user's text below based on your unique perspective as ${persona.name}. Keep your response concise (one paragraph). Engage with the plan and what others might have said.
+
+          **Full Discussion Context (Plan & Previous Turns):**
+          ---
+          ${context}
+          ---
+
+          **User's Text to Analyze:**
+          ---
+          ${state.originalText}
+          ---
+
+          Now, provide your analysis as ${persona.name}:
+        `;
+
+        const response = await ai.models.generateContent({ model, contents: prompt });
+        const responseText = response.text;
         
-        const responseText = `Based on my principles, the central argument about ${Math.random().toFixed(2)} is flawed. ${scratchpad.split('**Conclusion**: ')[1]}`;
         const turn: DiscussionTurn = { personaId, personaName: persona.name, text: responseText };
 
+        // Add this turn to memory so subsequent agents can see it.
         await memoryClient.add({ text: `${persona.name}: ${responseText}`, metadata: { type: 'agent_turn', agentId: persona.id } });
         newDiscussionTurns.push(turn);
-        await sleep(250); // Staggered thinking
     }
 
     return { discussion: [...state.discussion, ...newDiscussionTurns] };
@@ -138,20 +160,38 @@ async function specialistAgentNode(state: AgentState): Promise<Partial<AgentStat
 
 
 /**
- * Reflector Node (Simulates a separate DeepSeek instance for quality control)
- * Analyzes the output and decides if another iteration is needed.
+ * Reflector Node (Uses Gemini to decide whether to continue the discussion)
  */
 async function reflectionNode(state: AgentState): Promise<Partial<AgentState>> {
     console.log('[Reflector] Analyzing discussion quality...');
-    const reflection = `Reflection: The initial discussion is good but lacks a unified critique. Feynman's point about calculability and Einstein's about geometric principles are currently disconnected. The agents need to debate how these two points intersect.`;
+    const discussionText = state.discussion.map(turn => `${turn.personaName}: ${turn.text}`).join('\n');
+
+    const prompt = `
+      You are a reflector agent, acting as a moderator for a discussion among physicists. Your goal is to ensure the discussion is deep, synergistic, and not just a collection of separate opinions.
+
+      **Discussion So Far:**
+      ---
+      ${discussionText}
+      ---
+
+      **Task:**
+      Analyze the discussion. Has it achieved a meaningful synthesis? Or is it still superficial and in need of another round of debate?
+
+      **Respond with a single word followed by a brief reason.**
+      - If more debate is needed, respond with "CONTINUE: [Your reason]".
+      - If the discussion is sufficient, respond with "FINISH: [Your reason]".
+    `;
+
+    const response = await ai.models.generateContent({ model, contents: prompt });
+    const decisionText = response.text;
     
-    await memoryClient.add({ text: reflection, metadata: { type: 'reflection' }});
+    await memoryClient.add({ text: `Reflection: ${decisionText}`, metadata: { type: 'reflection' }});
     
-    if (state.iteration < state.maxIterations) {
-        console.log('[Reflector] Decision: CONTINUE. Another iteration is required for deeper synthesis.');
+    if (decisionText.startsWith("CONTINUE") && state.iteration < state.maxIterations) {
+        console.log(`[Reflector] Decision: CONTINUE. Reason: ${decisionText.replace("CONTINUE:", "").trim()}`);
         return { iteration: state.iteration + 1 };
     } else {
-        console.log('[Reflector] Decision: FINISH. Maximum iterations reached.');
+        console.log(`[Reflector] Decision: FINISH. Reason: ${decisionText.replace("FINISH:", "").trim()}`);
         return { finalOutput: state.discussion };
     }
 }
@@ -160,7 +200,7 @@ async function reflectionNode(state: AgentState): Promise<Partial<AgentState>> {
 /**
  * Main graph execution function.
  * This simulates the flow of a LangGraph by calling nodes in sequence
- * and managing the state object.
+ * and managing the state object, now with live Gemini calls.
  */
 export const runGraph = async (text: string, personas: PhysicistPersonaId[]): Promise<DiscussionTurn[]> => {
   // 1. Initialize State

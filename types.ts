@@ -15,6 +15,7 @@ export enum PhysicistPersonaId {
   SCHRODINGER = 'SCHRODINGER',
   DIRAC = 'DIRAC',
   HEISENBERG = 'HEISENBERG',
+  BOHR = 'BOHR',
 }
 
 export interface Physicist {

@@ -19,7 +19,7 @@ const PersonaSelector: React.FC<PersonaSelectorProps> = ({ selectedPersonas, onS
   return (
     <div>
       <h3 className="font-serif text-md font-semibold text-white mb-2">Assemble Round Table</h3>
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
         {PHYSICIST_PERSONAS.map(persona => (
           <button
             key={persona.id}

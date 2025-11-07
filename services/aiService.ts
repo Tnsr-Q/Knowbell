@@ -1,19 +1,49 @@
+
+import { GoogleGenAI, GenerateContentResponse, Type } from '@google/genai';
 import { AnalysisResult, DiscussionTurn, PaperSection, PhysicistPersonaId } from '../types';
 import { runGraph } from './langgraphService';
 
-// --- CONFIGURATION (FROM USER PROMPT) ---
-// These would be in a .env file in a real application
-const CEREBRAS_API_KEY = 'csk-wfrjvv55exhjxmwr2x4wvwjrpxdtw4yn64dn2nmtey6w6hjp';
-const DEEPSEEK_API_KEY = 'sk-6727d129077840a99ce39a497389e5e8';
-const DEEPSEEK_API_URL = 'https://api.deepseek.com';
+// Initialize the Gemini client, assuming API_KEY is in the environment
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
+const model = 'gemini-2.5-flash';
 
-// This function simulates a network delay
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+// Define the JSON schema for the AnalysisResult to ensure structured output from the model
+const analysisSchema = {
+  type: Type.OBJECT,
+  properties: {
+    guidelinesTitle: { type: Type.STRING },
+    qualityScore: { type: Type.NUMBER, description: "A score from 1 to 5, where 5 is best." },
+    violations: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          description: { type: Type.STRING },
+          severity: { type: Type.STRING, enum: ['Minor', 'Major', 'Critical'] },
+        },
+        required: ['description', 'severity'],
+      },
+    },
+    strengths: { type: Type.ARRAY, items: { type: Type.STRING } },
+    clarificationQuestions: { type: Type.ARRAY, items: { type: Type.STRING } },
+    recommendations: { type: Type.ARRAY, items: { type: Type.STRING } },
+    revisedText: { type: Type.STRING },
+  },
+  required: [
+    'guidelinesTitle',
+    'qualityScore',
+    'violations',
+    'strengths',
+    'clarificationQuestions',
+    'recommendations',
+    'revisedText',
+  ],
+};
+
 
 /**
- * Mocks a call to a powerful backend to analyze a section of a paper.
- * In a real app, this would make an authenticated request to a server that
- * orchestrates calls to DeepSeek (for reasoning) and Cerebras (for high-speed processing).
+ * Calls the Gemini API to analyze a section of a paper.
+ * It uses JSON mode with a schema to get a structured, predictable response.
  * @param text The text of the paper section.
  * @param section The type of the paper section.
  * @param format The target publication format.
@@ -24,52 +54,56 @@ export const analyzeSection = async (
   section: PaperSection,
   format: string
 ): Promise<AnalysisResult> => {
-  console.log(`Analyzing ${section} for ${format} with DeepSeek and Cerebras...`);
-  console.log(`Text length: ${text.length}`);
+  console.log(`Analyzing ${section} for ${format} with Gemini...`);
 
-  // Simulate API call latency
-  await sleep(1500 + Math.random() * 1000);
+  const prompt = `
+    You are an expert scientific paper reviewer for top-tier physics journals.
+    Your task is to analyze the following section of a research paper and provide a structured review.
 
-  // Return realistic mock data
-  return {
-    guidelinesTitle: `Analysis for ${section} based on ${format} standards`,
-    qualityScore: 3 + Math.floor(Math.random() * 2), // Random score 3 or 4
-    violations: [
-      {
-        description: `Clarity of the central argument could be improved in the second paragraph. The transition lacks a clear logical bridge.`,
-        severity: 'Major',
-      },
-      {
-        description: `Equation (3) is not properly referenced in the text preceding its introduction. According to ${format} guidelines, all equations must be introduced.`,
-        severity: 'Minor',
-      },
-       {
-        description: `The derivation connecting the path integral formalism to the final state is mathematically dense and assumes significant prior knowledge. Consider adding a supplemental appendix.`,
-        severity: 'Critical',
-      },
-    ],
-    strengths: [
-      'Novelty of the proposed formalism is exceptionally high.',
-      'Mathematical rigor in the initial sections is commendable and meets the highest academic standards.',
-      'The connection to experimental observables is clearly articulated, which is a significant strength.',
-    ],
-    clarificationQuestions: [
-      'What is the physical interpretation of the boundary term in equation (5)?',
-      'Could the regularization scheme be sensitive to the choice of contour in the complex plane?',
-    ],
-    recommendations: [
-        'Restructure the second paragraph to state the conclusion first, then provide the supporting steps.',
-        'Add a sentence before Equation (3) such as: "The dynamics are governed by the following relation:".',
-        'Elaborate on the physical justification for the choice of gauge fixing.'
-    ],
-    revisedText: `[REVISED TEXT] \n${text}\n\nThis revised version incorporates feedback focusing on enhancing clarity and adherence to the ${format} style guide. The logical flow has been improved, and equation references are now correctly placed.`
-  };
+    **Publication Target:** ${format}
+    **Paper Section:** ${section}
+
+    **Input Text:**
+    ---
+    ${text}
+    ---
+
+    **Instructions:**
+    1.  **Analyze the text critically** based on the standards of the target publication.
+    2.  **Provide a Quality Score** from 1 (poor) to 5 (excellent).
+    3.  **Identify Violations:** List specific issues, categorizing their severity as 'Minor', 'Major', or 'Critical'. These should be actionable criticisms.
+    4.  **List Strengths:** Identify at least 2-3 key strengths of the text.
+    5.  **Pose Clarification Questions:** Ask questions that would help the author clarify ambiguous points.
+    6.  **Give Recommendations:** Suggest concrete changes to improve the text.
+    7.  **Provide a Revised Text:** Offer a rewritten version of a key paragraph or the full text that implements your most important feedback.
+    8.  **Format your entire response as a single JSON object** that adheres to the provided schema. Do not include any markdown formatting or explanatory text outside of the JSON structure.
+  `;
+  
+  try {
+    const response: GenerateContentResponse = await ai.models.generateContent({
+      model: model,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: analysisSchema,
+      }
+    });
+
+    const jsonText = response.text.trim();
+    // The response text is guaranteed by the API to be valid JSON when using responseSchema
+    const result = JSON.parse(jsonText) as AnalysisResult;
+    return result;
+  } catch (error) {
+    console.error("Error during Gemini API call in analyzeSection:", error);
+    if (error instanceof Error) {
+        throw new Error(`Failed to analyze section with Gemini. ${error.message}`);
+    }
+    throw new Error('An unknown error occurred during analysis.');
+  }
 };
 
 /**
- * Generates a round-table discussion by invoking the LangGraph service.
- * This function now acts as a pass-through to the more sophisticated, memory-enabled
- * conversational agent simulation.
+ * Generates a round-table discussion by invoking the live LangGraph service.
  * @param text The text to be discussed.
  * @param personas The array of selected physicist persona IDs.
  * @returns A promise that resolves to an array of DiscussionTurn objects.
@@ -82,7 +116,15 @@ export const generateDiscussion = async (
   
   if (personas.length === 0) return [];
   
-  // Delegate the core logic to the LangGraph service simulation
-  const discussion = await runGraph(text, personas);
-  return discussion;
+  // Delegate the core logic to the LangGraph service, which now uses real API calls.
+  try {
+    const discussion = await runGraph(text, personas);
+    return discussion;
+  } catch (error) {
+     console.error("Error during Gemini API call in generateDiscussion (via runGraph):", error);
+     if (error instanceof Error) {
+        throw new Error(`Failed to generate discussion. ${error.message}`);
+    }
+    throw new Error('An unknown error occurred while generating discussion.');
+  }
 };
