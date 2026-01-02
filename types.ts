@@ -7,6 +7,7 @@ export enum PaperSection {
   RESULTS = 'Results',
   CONCLUSION = 'Conclusion',
   FIGURES = 'Figures',
+  SUPPLEMENTAL_MATERIAL = 'Supplemental Material',
 }
 
 export enum PhysicistPersonaId {
